@@ -63,16 +63,151 @@ check_sudo() {
     fi
 }
 
+# Check internet connectivity
+check_internet() {
+    print_info "Checking internet connectivity..."
+    if ! ping -c 1 -W 2 google.com &> /dev/null && ! ping -c 1 -W 2 8.8.8.8 &> /dev/null; then
+        print_error "No internet connection detected"
+        print_error "Internet connection is required for installation"
+        exit 1
+    fi
+    print_success "Internet connection verified"
+}
+
+# Check required tools
+check_required_tools() {
+    print_info "Checking for required tools..."
+    local missing_tools=()
+
+    if ! command -v wget &> /dev/null; then
+        missing_tools+=("wget")
+    fi
+
+    if ! command -v sudo &> /dev/null; then
+        missing_tools+=("sudo")
+    fi
+
+    if [ ${#missing_tools[@]} -gt 0 ]; then
+        print_error "Missing required tools: ${missing_tools[*]}"
+        print_info "Install with: sudo apt install ${missing_tools[*]}"
+        exit 1
+    fi
+    print_success "All required tools present"
+}
+
+# Check disk space (need at least 500MB)
+check_disk_space() {
+    print_info "Checking available disk space..."
+    local available_mb=$(df /tmp | tail -1 | awk '{print int($4/1024)}')
+    if [ "$available_mb" -lt 500 ]; then
+        print_warning "Low disk space: ${available_mb}MB available"
+        print_warning "At least 500MB recommended"
+        read -p "Continue anyway? (y/n) " -n 1 -r
+        echo
+        if [[ ! $REPLY =~ ^[Yy]$ ]]; then
+            exit 1
+        fi
+    else
+        print_success "Sufficient disk space: ${available_mb}MB available"
+    fi
+}
+
+# Check Python version (need 3.8+)
+check_python_version() {
+    if command -v python3 &> /dev/null; then
+        local python_version=$(python3 -c 'import sys; print(".".join(map(str, sys.version_info[:2])))')
+        local major=$(echo "$python_version" | cut -d. -f1)
+        local minor=$(echo "$python_version" | cut -d. -f2)
+
+        if [ "$major" -lt 3 ] || { [ "$major" -eq 3 ] && [ "$minor" -lt 8 ]; }; then
+            print_error "Python $python_version is too old (need 3.8+)"
+            return 1
+        fi
+    fi
+    return 0
+}
+
+# Check what needs to be installed
+check_installation_status() {
+    echo ""
+    print_info "Checking current installation status..."
+    echo ""
+
+    local needs_chrome=false
+    local needs_chromedriver=false
+    local needs_python=false
+    local needs_pip=false
+    local needs_selenium=false
+
+    # Check Chrome
+    if ! command -v google-chrome &> /dev/null; then
+        echo "  ⚪ Chrome: Not installed"
+        needs_chrome=true
+    else
+        echo "  ✓ Chrome: $(google-chrome --version)"
+    fi
+
+    # Check ChromeDriver
+    if ! command -v chromedriver &> /dev/null; then
+        echo "  ⚪ ChromeDriver: Not installed"
+        needs_chromedriver=true
+    else
+        echo "  ✓ ChromeDriver: $(chromedriver --version 2>&1 | head -n1)"
+    fi
+
+    # Check Python
+    if ! command -v python3 &> /dev/null || ! check_python_version; then
+        echo "  ⚪ Python 3.8+: Not installed"
+        needs_python=true
+    else
+        echo "  ✓ Python: $(python3 --version)"
+    fi
+
+    # Check pip
+    if ! command -v pip3 &> /dev/null; then
+        echo "  ⚪ pip3: Not installed"
+        needs_pip=true
+    else
+        echo "  ✓ pip3: Installed"
+    fi
+
+    # Check Selenium
+    if ! python3 -c "import selenium" 2>/dev/null; then
+        echo "  ⚪ Selenium: Not installed"
+        needs_selenium=true
+    else
+        local selenium_ver=$(python3 -c "import selenium; print(selenium.__version__)" 2>/dev/null)
+        echo "  ✓ Selenium: $selenium_ver"
+    fi
+
+    echo ""
+
+    if ! $needs_chrome && ! $needs_chromedriver && ! $needs_python && ! $needs_pip && ! $needs_selenium; then
+        print_success "All dependencies are already installed!"
+        echo ""
+        read -p "Run installation anyway to verify/update? (y/n) " -n 1 -r
+        echo
+        if [[ ! $REPLY =~ ^[Yy]$ ]]; then
+            echo "Installation skipped"
+            exit 0
+        fi
+    else
+        print_info "The following will be installed:"
+        $needs_chrome && echo "  • Google Chrome browser"
+        $needs_chromedriver && echo "  • ChromeDriver"
+        $needs_python && echo "  • Python 3.8+"
+        $needs_pip && echo "  • pip3"
+        $needs_selenium && echo "  • Selenium library"
+        echo ""
+    fi
+}
+
 # Main installation function
 main() {
     print_header "TERAPEAK BARCODE SCANNER INSTALLATION"
 
-    echo "This script will install:"
-    echo "  • Google Chrome browser"
-    echo "  • ChromeDriver"
-    echo "  • Python Selenium library"
-    echo "  • Terapeak barcode scanner script"
-    echo ""
+    check_installation_status
+
     read -p "Continue with installation? (y/n) " -n 1 -r
     echo
     if [[ ! $REPLY =~ ^[Yy]$ ]]; then
@@ -82,6 +217,9 @@ main() {
 
     check_system
     check_sudo
+    check_required_tools
+    check_internet
+    check_disk_space
 
     echo ""
     print_header "STEP 1: UPDATE SYSTEM"
@@ -99,13 +237,32 @@ main() {
     # Check if Python 3 is installed
     if command -v python3 &> /dev/null; then
         PYTHON_VERSION=$(python3 --version)
-        print_success "Python 3 already installed: $PYTHON_VERSION"
+        if check_python_version; then
+            print_success "Python 3 already installed: $PYTHON_VERSION"
+        else
+            print_warning "$PYTHON_VERSION detected (need 3.8+)"
+            echo "Installing newer Python 3..."
+            sudo apt install -y python3 python3-pip || {
+                print_error "Failed to install Python 3"
+                exit 1
+            }
+            if ! check_python_version; then
+                print_error "Python version still too old after installation"
+                print_error "Please upgrade Python manually to 3.8 or higher"
+                exit 1
+            fi
+            print_success "Python 3 installed"
+        fi
     else
         echo "Installing Python 3..."
         sudo apt install -y python3 python3-pip || {
             print_error "Failed to install Python 3"
             exit 1
         }
+        if ! check_python_version; then
+            print_error "Installed Python version is too old (need 3.8+)"
+            exit 1
+        fi
         print_success "Python 3 installed"
     fi
 
@@ -163,12 +320,29 @@ main() {
     echo ""
     print_header "STEP 5: INSTALL PYTHON DEPENDENCIES"
 
-    echo "Installing Selenium..."
-    pip3 install --user selenium || {
-        print_error "Failed to install Selenium"
-        exit 1
-    }
-    print_success "Selenium installed"
+    # Check if Selenium is already installed
+    if python3 -c "import selenium" 2>/dev/null; then
+        SELENIUM_VERSION=$(python3 -c "import selenium; print(selenium.__version__)" 2>/dev/null)
+        print_success "Selenium already installed: $SELENIUM_VERSION"
+
+        # Ask if user wants to upgrade
+        read -p "Update Selenium to latest version? (y/n) " -n 1 -r
+        echo
+        if [[ $REPLY =~ ^[Yy]$ ]]; then
+            echo "Updating Selenium..."
+            pip3 install --user --upgrade selenium || {
+                print_warning "Failed to upgrade Selenium (current version still works)"
+            }
+        fi
+    else
+        echo "Installing Selenium..."
+        pip3 install --user selenium || {
+            print_error "Failed to install Selenium"
+            print_info "Try: python3 -m pip install --user selenium"
+            exit 1
+        }
+        print_success "Selenium installed"
+    fi
 
     echo ""
     print_header "STEP 6: SETUP BARCODE SCANNER SCRIPT"
